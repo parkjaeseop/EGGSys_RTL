@@ -1,0 +1,231 @@
+`timescale 1ns/1ps
+
+// 28x28 input -> 5x5 Conv (3 channels) -> 2x2 MaxPool + ReLU.
+// One image per reset. Pixels are accepted only when valid_in is 1.
+module cnn_stage1 (
+    input clk,
+    input rst_n,
+    input valid_in,
+    input [7:0] data_in,
+    input [0:199] w_11,
+    input [0:199] w_12,
+    input [0:199] w_13,
+    input [0:23] b_1,
+
+    output reg signed [11:0] conv_out_1,
+    output reg signed [11:0] conv_out_2,
+    output reg signed [11:0] conv_out_3,
+    output reg valid_out_conv,
+
+    output reg [11:0] max_value_1,
+    output reg [11:0] max_value_2,
+    output reg [11:0] max_value_3,
+    output reg valid_out_2
+);
+
+    reg [7:0] line_buffer [0:139];
+    reg [7:0] window_pixels [0:24];
+
+    reg [4:0] pixel_row, pixel_col;
+    reg [2:0] write_bank;
+    reg frame_done, window_valid;
+
+    integer row_offset, col_offset, reset_index;
+
+    reg signed [19:0] sum_1, sum_2, sum_3;
+    wire signed [7:0] bias_1, bias_2, bias_3;
+
+    integer k;
+
+    reg signed [11:0] row_max_1 [0:11];
+    reg signed [11:0] row_max_2 [0:11];
+    reg signed [11:0] row_max_3 [0:11];
+
+    reg [4:0] pool_row, pool_col;
+
+    assign bias_1 = b_1[0:7];
+    assign bias_2 = b_1[8:15];
+    assign bias_3 = b_1[16:23];
+
+    function [11:0] max_relu;
+        input signed [11:0] a;
+        input signed [11:0] b;
+
+        reg signed [11:0] largest;
+
+        begin
+            largest = (a > b) ? a : b;
+            max_relu = (largest > 0) ? largest : 12'd0;
+        end
+    endfunction
+
+    // Five-row circular buffer and 5x5 window selection.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            pixel_row <= 0;
+            pixel_col <= 0;
+            write_bank <= 0;
+            frame_done <= 0;
+            window_valid <= 0;
+
+            for (reset_index = 0; reset_index < 25;
+                 reset_index = reset_index + 1)
+                window_pixels[reset_index] <= 0;
+
+        end else begin
+            window_valid <= 0;
+
+            if (valid_in && !frame_done) begin
+                line_buffer[write_bank * 28 + pixel_col] <= data_in;
+
+                if (pixel_row >= 4 && pixel_col >= 4) begin
+                    for (row_offset = 0; row_offset < 5;
+                         row_offset = row_offset + 1) begin
+
+                        for (col_offset = 0; col_offset < 5;
+                             col_offset = col_offset + 1) begin
+
+                            if (row_offset == 4 && col_offset == 4)
+                                window_pixels[row_offset * 5 + col_offset]
+                                    <= data_in;
+                            else
+                                window_pixels[row_offset * 5 + col_offset]
+                                    <= line_buffer[
+                                        ((write_bank + 1 + row_offset) % 5)
+                                        * 28 + pixel_col - 4 + col_offset
+                                    ];
+                        end
+                    end
+
+                    window_valid <= 1;
+                end
+
+                if (pixel_col == 27) begin
+                    pixel_col <= 0;
+
+                    if (write_bank == 4)
+                        write_bank <= 0;
+                    else
+                        write_bank <= write_bank + 1'b1;
+
+                    if (pixel_row == 27)
+                        frame_done <= 1;
+                    else
+                        pixel_row <= pixel_row + 1'b1;
+
+                end else begin
+                    pixel_col <= pixel_col + 1'b1;
+                end
+            end
+        end
+    end
+
+    // Unsigned pixels and signed 8-bit weights.
+    // Each accumulated sum is 20 bits.
+    always @(*) begin
+        sum_1 = 0;
+        sum_2 = 0;
+        sum_3 = 0;
+
+        for (k = 0; k < 25; k = k + 1) begin
+            sum_1 = sum_1
+                + $signed({1'b0, window_pixels[k]})
+                * $signed(w_11[8*k +: 8]);
+
+            sum_2 = sum_2
+                + $signed({1'b0, window_pixels[k]})
+                * $signed(w_12[8*k +: 8]);
+
+            sum_3 = sum_3
+                + $signed({1'b0, window_pixels[k]})
+                * $signed(w_13[8*k +: 8]);
+        end
+    end
+
+    // Original Conv1 numeric rule: sum[19:8] + signed bias.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            conv_out_1 <= 0;
+            conv_out_2 <= 0;
+            conv_out_3 <= 0;
+            valid_out_conv <= 0;
+
+        end else begin
+            valid_out_conv <= window_valid;
+
+            if (window_valid) begin
+                conv_out_1 <= sum_1[19:8]
+                    + {{4{bias_1[7]}}, bias_1};
+
+                conv_out_2 <= sum_2[19:8]
+                    + {{4{bias_2[7]}}, bias_2};
+
+                conv_out_3 <= sum_3[19:8]
+                    + {{4{bias_3[7]}}, bias_3};
+            end
+        end
+    end
+
+    // Independent 2x2 MaxPool + ReLU for each channel.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            pool_row <= 0;
+            pool_col <= 0;
+
+            max_value_1 <= 0;
+            max_value_2 <= 0;
+            max_value_3 <= 0;
+
+            valid_out_2 <= 0;
+
+        end else begin
+            valid_out_2 <= 0;
+
+            if (valid_out_conv) begin
+
+                // Top-left value of each 2x2 region.
+                if (!pool_row[0] && !pool_col[0]) begin
+                    row_max_1[pool_col >> 1] <= conv_out_1;
+                    row_max_2[pool_col >> 1] <= conv_out_2;
+                    row_max_3[pool_col >> 1] <= conv_out_3;
+
+                // Bottom-right value: finish comparison and apply ReLU.
+                end else if (pool_row[0] && pool_col[0]) begin
+                    max_value_1 <= max_relu(
+                        row_max_1[pool_col >> 1], conv_out_1
+                    );
+
+                    max_value_2 <= max_relu(
+                        row_max_2[pool_col >> 1], conv_out_2
+                    );
+
+                    max_value_3 <= max_relu(
+                        row_max_3[pool_col >> 1], conv_out_3
+                    );
+
+                    valid_out_2 <= 1;
+
+                // Top-right or bottom-left value.
+                end else begin
+                    if (conv_out_1 > row_max_1[pool_col >> 1])
+                        row_max_1[pool_col >> 1] <= conv_out_1;
+
+                    if (conv_out_2 > row_max_2[pool_col >> 1])
+                        row_max_2[pool_col >> 1] <= conv_out_2;
+
+                    if (conv_out_3 > row_max_3[pool_col >> 1])
+                        row_max_3[pool_col >> 1] <= conv_out_3;
+                end
+
+                if (pool_col == 23) begin
+                    pool_col <= 0;
+                    pool_row <= pool_row + 1'b1;
+
+                end else begin
+                    pool_col <= pool_col + 1'b1;
+                end
+            end
+        end
+    end
+
+endmodule
