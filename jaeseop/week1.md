@@ -1,7 +1,8 @@
 # week1 수정점
 * conv1_calc와 conv2_calc가 설계 의도인 100MHz에서는 정상적으로 동작할 수 없는 타이밍 에러를 가지고 있음을 발견함.
 * 가장 timing을 많이 잡아먹는 calc_out_1,2,3 의 곱셈과 덧셈이 이어진 부분을 pipeline 으로 정리하여 100MHz에서도 잘 동작할 수 있도록 타이밍을 맞춤.
-## 변경한 부분 464 ~ 592 번째 줄.
+* conv1_buf에서 140칸의 버퍼는 너무 크다는 경고가 떠서 shift register 방식으로 변경함.
+## conv_calc에서 변경한 부분 (464 ~ 592 번째 줄)
 ```verilog
 // Add Pipeline to match clk
 reg [5:0]         valid_d;
@@ -133,6 +134,115 @@ reg signed [21:0]  r_st_43       ;
 
  assign valid_out_calc = valid_d[5];
 ```
+## conv_buf에서 변경한 부분
+```verilog
+ module conv1_buf #(parameter WIDTH = 28, HEIGHT = 28, DATA_BITS = 8)(
+   input clk,
+   input rst_n,
+   input valid_in,
+   input [DATA_BITS - 1:0] data_in,
+   output reg [DATA_BITS - 1:0] data_out_0, data_out_1, data_out_2, data_out_3, data_out_4,
+   data_out_5, data_out_6, data_out_7, data_out_8, data_out_9,
+   data_out_10, data_out_11, data_out_12, data_out_13, data_out_14,
+   data_out_15, data_out_16, data_out_17, data_out_18, data_out_19,
+   data_out_20, data_out_21, data_out_22, data_out_23, data_out_24,
+   output reg valid_out_buf
+ );
+
+ localparam FILTER_SIZE = 5;
+
+ reg [DATA_BITS - 1:0] buffer_1 [0:WIDTH - 1];
+ reg [DATA_BITS - 1:0] buffer_2 [0:WIDTH - 1];
+ reg [DATA_BITS - 1:0] buffer_3 [0:WIDTH - 1];
+ reg [DATA_BITS - 1:0] buffer_4 [0:WIDTH - 1];
+ 
+ reg [4:0] w_idx, h_idx;
+
+ always @(posedge clk or negedge rst_n) begin
+    if(~rst_n) begin
+        w_idx <= 0;
+        h_idx <= 0;
+        valid_out_buf <= 0;
+     end
+     else begin
+        if(valid_in) begin
+            w_idx <= w_idx + 1;
+            if(w_idx == WIDTH - 1) begin
+                w_idx <= 0;
+                if(h_idx == HEIGHT - 1) begin
+                    h_idx <= 0;
+                end
+                else begin
+                    h_idx <= h_idx + 1;
+                end
+            end
+            // does window valid?
+            if(w_idx >= FILTER_SIZE - 1 && h_idx >= FILTER_SIZE - 1) begin
+                valid_out_buf <= 1'b1;                
+            end
+            else begin
+                valid_out_buf <= 1'b0;
+            end           
+        end
+        
+        else begin
+            valid_out_buf <= 1'b0;
+        end
+    end
+ end
+ 
+ integer j;
+ 
+ always @(posedge clk) begin
+    if(valid_in) begin
+        buffer_1 [0] <= data_in;
+        buffer_2 [0] <= buffer_1 [WIDTH - 1];
+        buffer_3 [0] <= buffer_2 [WIDTH - 1];
+        buffer_4 [0] <= buffer_3 [WIDTH - 1];
+        
+        for (j = 1; j < WIDTH; j = j+1) begin
+            buffer_1 [j] <= buffer_1[j-1];
+            buffer_2 [j] <= buffer_2[j-1];
+            buffer_3 [j] <= buffer_3[j-1];
+            buffer_4 [j] <= buffer_4[j-1];            
+        end
+        
+        // first window
+        data_out_0  <= data_out_1;
+        data_out_1  <= data_out_2;
+        data_out_2  <= data_out_3;  
+        data_out_3  <= data_out_4;
+        data_out_4  <= buffer_4[WIDTH-1];
+        // second window
+        data_out_5  <= data_out_6;  
+        data_out_6  <= data_out_7;
+        data_out_7  <= data_out_8;  
+        data_out_8  <= data_out_9;
+        data_out_9  <= buffer_3[WIDTH-1];
+        // third window
+        data_out_10 <= data_out_11; 
+        data_out_11 <= data_out_12;
+        data_out_12 <= data_out_13; 
+        data_out_13 <= data_out_14;
+        data_out_14 <= buffer_2[WIDTH-1];
+        // forth window
+        data_out_15 <= data_out_16; 
+        data_out_16 <= data_out_17;
+        data_out_17 <= data_out_18; 
+        data_out_18 <= data_out_19;
+        data_out_19 <= buffer_1[WIDTH-1];
+        // fifth window
+        data_out_20 <= data_out_21; 
+        data_out_21 <= data_out_22;
+        data_out_22 <= data_out_23; 
+        data_out_23 <= data_out_24;
+        data_out_24 <= data_in;
+     end
+  end
+endmodule
+```
+
+
 ## 변경한 코드 전체
 ```verilog
 /*------------------------------------------------------------------------
